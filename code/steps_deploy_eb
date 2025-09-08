@@ -1,0 +1,171 @@
+ere’s a clean, copy-pasteable end-to-end checklist for Option A: push your Docker image to Amazon ECR and deploy it on Elastic Beanstalk using Dockerrun.aws.json.
+(I’ll use this concrete example — replace with your real values where needed:)
+
+Account ID: 123456789012
+
+Region: us-east-1
+
+Repo name: churn-waitress
+
+EB app: churn-app
+
+EB env: churn-env
+
+0) Prereqs (one time)
+
+Install Docker Desktop and make sure docker --version works.
+
+Install AWS CLI and configure:
+
+aws configure
+# enter Access Key, Secret Key, region (us-east-1), output (json)
+
+
+(Recommended) Install EB CLI:
+
+pip install --upgrade awsebcli
+
+1) Build your Docker image locally
+
+From the folder with your Dockerfile, requirements.txt, predict.py, model files:
+
+docker build -t churn-waitress .
+
+
+Verify:
+
+docker images
+
+2) Create ECR repository and push the image
+
+Create a private ECR repo (safe if it already exists):
+
+aws ecr create-repository --repository-name churn-waitress --region us-east-1
+
+
+Log in Docker to your ECR registry:
+
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com
+
+
+Tag the local image with your ECR repo URI:
+
+docker tag churn-waitress:latest 123456789012.dkr.ecr.us-east-1.amazonaws.com/churn-waitress:latest
+
+
+Push to ECR:
+
+docker push 123456789012.dkr.ecr.us-east-1.amazonaws.com/churn-waitress:latest
+
+3) Prepare a minimal EB deployment folder
+
+Create a fresh folder for EB deployment (can be anywhere), e.g. deploy-eb/, with these files:
+
+deploy-eb/Dockerrun.aws.json
+
+{
+  "AWSEBDockerrunVersion": "1",
+  "Image": {
+    "Name": "123456789012.dkr.ecr.us-east-1.amazonaws.com/churn-waitress:latest",
+    "Update": "true"
+  },
+  "Ports": [
+    { "ContainerPort": "9696" }
+  ]
+}
+
+
+deploy-eb/.ebextensions/healthcheck.config
+
+option_settings:
+  aws:elasticbeanstalk:environment:process: default:
+    Port: '9696'
+    HealthCheckPath: /health
+
+
+Your Flask app must expose GET /health returning HTTP 200.
+
+4) Initialize Elastic Beanstalk (in deploy-eb/)
+cd deploy-eb
+eb init churn-app --platform "Docker running on 64bit Amazon Linux 2" --region us-east-1
+
+5) Create the EB environment (this gives you a public URL)
+
+Cheapest test setup (single instance, no load balancer):
+
+eb create churn-env --single --instance_type t3.micro
+
+
+With Application Load Balancer (recommended for production):
+
+eb create churn-env --elb-type application --instance_type t3.micro
+
+
+Wait until health is Green (first deploy can take a few minutes). eb status
+
+6) Open and test
+
+Open in browser:
+
+eb open
+
+
+Health check:
+
+curl http://<your-eb-url>/health
+
+
+Prediction (adjust payload to your schema):
+
+curl -X POST http://<your-eb-url>/predict \
+  -H "Content-Type: application/json" \
+  -d @sample.json
+
+7) Deploy updates later
+
+When you change code and rebuild:
+
+docker build -t churn-waitress .
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com
+docker tag churn-waitress:latest 123456789012.dkr.ecr.us-east-1.amazonaws.com/churn-waitress:latest
+docker push 123456789012.dkr.ecr.us-east-1.amazonaws.com/churn-waitress:latest
+eb deploy
+
+
+(If you use versioned tags like :v2, update the tag in Dockerrun.aws.json before eb deploy.)
+
+8) Operating / stopping / saving costs
+
+Tail logs:
+
+eb logs --follow
+
+
+Scale to zero (pause without deleting env):
+
+eb scale 0
+
+
+Bring it back:
+
+eb scale 1
+
+
+Terminate environment (fully stop EC2 and LB):
+
+eb terminate churn-env
+
+
+(Your image remains in ECR; redeploy later with eb create.)
+
+Common gotchas (quick fixes)
+
+404 at root: hit /health or /predict specifically.
+
+Health red: ensure app binds to 0.0.0.0:9696, port set to 9696 in both files, /health returns 200.
+
+ECR pull denied: instance profile needs ECR read permissions (EB usually sets this up).
+
+Wrong account/region in Dockerrun.aws.json: must exactly match the ECR URI you pushed.
+
+That’s it — this flow gets you from a local Docker image → ECR → a live Elastic Beanstalk URL serving your /predict endpoint.
